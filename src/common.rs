@@ -139,10 +139,20 @@ fn get_software_update_channel() -> String {
     }
 }
 
-fn validate_software_update_manifest(resp: &SoftwareUpdateManifest) -> hbb_common::ResultType<()> {
+fn validate_software_update_manifest(
+    resp: &SoftwareUpdateManifest,
+    expected_channel: &str,
+) -> hbb_common::ResultType<()> {
     if resp.version.trim().is_empty() || resp.url.trim().is_empty() || resp.sha256.trim().is_empty()
     {
         bail!("Invalid update manifest: version/url/sha256 are required");
+    }
+    if !resp.channel.trim().is_empty() && !resp.channel.eq_ignore_ascii_case(expected_channel) {
+        bail!(
+            "Invalid update manifest: channel mismatch, expected={} actual={}",
+            expected_channel,
+            resp.channel
+        );
     }
     let parsed = Url::parse(resp.url.trim())?;
     if parsed.scheme() != "https" {
@@ -1056,8 +1066,18 @@ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
         }
     };
     let bytes = latest_release_response.bytes().await?;
-    let resp: SoftwareUpdateManifest = serde_json::from_slice(&bytes)?;
-    validate_software_update_manifest(&resp)?;
+    let mut resp: SoftwareUpdateManifest = serde_json::from_slice(&bytes)?;
+    validate_software_update_manifest(&resp, &channel)?;
+    if !resp.min_supported.trim().is_empty()
+        && get_version_number(crate::VERSION) < get_version_number(&resp.min_supported)
+    {
+        log::warn!(
+            "current version {} is below min_supported {}, forcing mandatory update semantics",
+            crate::VERSION,
+            resp.min_supported
+        );
+        resp.mandatory = true;
+    }
     log::info!(
         "update check finished: channel={} remote_version={} mandatory={} min_supported={} url={}",
         channel,
@@ -2547,15 +2567,19 @@ mod tests {
             min_supported: "1.0.0".to_owned(),
             changelog: "ok".to_owned(),
         };
-        assert!(validate_software_update_manifest(&ok).is_ok());
+        assert!(validate_software_update_manifest(&ok, "recommended").is_ok());
 
         let mut bad_host = ok.clone();
         bad_host.url = "https://example.com/releases/windows/updesk-1.0.3.exe".to_owned();
-        assert!(validate_software_update_manifest(&bad_host).is_err());
+        assert!(validate_software_update_manifest(&bad_host, "recommended").is_err());
 
         let mut bad_hash = ok.clone();
         bad_hash.sha256 = "xyz".to_owned();
-        assert!(validate_software_update_manifest(&bad_hash).is_err());
+        assert!(validate_software_update_manifest(&bad_hash, "recommended").is_err());
+
+        let mut bad_channel = ok.clone();
+        bad_channel.channel = "beta".to_owned();
+        assert!(validate_software_update_manifest(&bad_channel, "recommended").is_err());
     }
 
     #[tokio::test]

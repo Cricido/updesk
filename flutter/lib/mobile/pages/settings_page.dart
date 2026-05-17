@@ -234,6 +234,29 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
     super.dispose();
   }
 
+  Future<void> _waitForUpdateIdle({
+    Duration timeout = const Duration(seconds: 20),
+  }) async {
+    final start = DateTime.now();
+    while (mounted) {
+      final status =
+          bind.mainGetCommonSync(key: 'software-update-status').trim();
+      if (!const {
+        'checking',
+        'downloading',
+        'verifying',
+        'preparing',
+        'launching',
+      }.contains(status)) {
+        return;
+      }
+      if (DateTime.now().difference(start) >= timeout) {
+        return;
+      }
+      await Future.delayed(const Duration(milliseconds: 250));
+    }
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
@@ -667,7 +690,23 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
       leading: const Icon(Icons.system_update_alt),
       onPressed: (context) async {
         bind.mainGetSoftwareUpdateUrl();
-        showToast('Controllo aggiornamenti avviato');
+        await _waitForUpdateIdle();
+        final status =
+            bind.mainGetCommonSync(key: 'software-update-status').trim();
+        final error =
+            bind.mainGetCommonSync(key: 'software-update-error').trim();
+        if (error.isNotEmpty) {
+          showToast(error);
+        } else if (status == 'up-to-date') {
+          showToast('Nessun aggiornamento disponibile.');
+        } else if (status == 'available') {
+          showToast('Nuovo aggiornamento disponibile.');
+        } else if (status == 'deferred') {
+          showToast(
+              'Aggiornamento pronto: verra installato quando non ci sono sessioni attive.');
+        } else {
+          showToast('Controllo aggiornamenti completato.');
+        }
       },
     ));
 

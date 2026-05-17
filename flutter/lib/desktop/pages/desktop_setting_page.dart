@@ -858,6 +858,30 @@ class _UpdatesState extends State<_Updates> {
     });
   }
 
+  bool _isBusyStatus(String status) => const {
+        'checking',
+        'downloading',
+        'verifying',
+        'preparing',
+        'launching',
+      }.contains(status);
+
+  Future<void> _waitForUpdateIdle({
+    Duration timeout = const Duration(seconds: 20),
+  }) async {
+    final start = DateTime.now();
+    while (mounted) {
+      await _refreshState();
+      if (!_isBusyStatus(_status)) {
+        return;
+      }
+      if (DateTime.now().difference(start) >= timeout) {
+        return;
+      }
+      await Future.delayed(const Duration(milliseconds: 250));
+    }
+  }
+
   _UpdatePolicy _readPolicy() {
     final channel = bind.mainGetLocalOption(key: kOptionUpdateChannel).trim();
     final checkEnabled = mainGetLocalBoolOptionSync(kOptionEnableCheckUpdate);
@@ -909,11 +933,16 @@ class _UpdatesState extends State<_Updates> {
       showToast('Controllo aggiornamenti disattivato dalla policy corrente.');
       return;
     }
+    setState(() {
+      _status = 'checking';
+      _error = '';
+    });
     bind.mainGetSoftwareUpdateUrl();
-    await Future.delayed(const Duration(seconds: 2));
-    await _refreshState();
+    await _waitForUpdateIdle();
     if (_status == 'up-to-date') {
       showToast('Nessun aggiornamento disponibile.');
+    } else if (_status == 'available') {
+      showToast('Nuovo aggiornamento disponibile.');
     } else if (_error.isNotEmpty) {
       showToast(_error);
     }
@@ -925,23 +954,22 @@ class _UpdatesState extends State<_Updates> {
       showToast('Nessun pacchetto update disponibile.');
       return;
     }
+    setState(() {
+      _status = 'preparing';
+      _error = '';
+    });
     await bind.mainSetCommon(key: 'update-me', value: updateUrl);
-    await Future.delayed(const Duration(milliseconds: 300));
-    await _refreshState();
+    await _waitForUpdateIdle();
     if (_error.isNotEmpty) {
       showToast(_error);
     } else if (_status == 'installer-launched') {
       showToast('Aggiornamento avviato. UpDesk verra riavviato.');
+    } else if (_status == 'deferred') {
+      showToast('Aggiornamento pronto: verra installato quando non ci sono sessioni attive.');
     }
   }
 
-  bool get _isBusy => const {
-        'checking',
-        'downloading',
-        'verifying',
-        'preparing',
-        'launching',
-      }.contains(_status);
+  bool get _isBusy => _isBusyStatus(_status);
 
   String _statusLabel() {
     if (_error.isNotEmpty) {
@@ -962,6 +990,8 @@ class _UpdatesState extends State<_Updates> {
         return 'Preparazione aggiornamento...';
       case 'launching':
         return 'Avvio installer in corso...';
+      case 'deferred':
+        return 'Aggiornamento pronto: installazione rinviata fino a fine sessioni attive.';
       case 'installer-launched':
         return 'Installer avviato correttamente.';
       case 'up-to-date':

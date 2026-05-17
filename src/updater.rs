@@ -33,6 +33,8 @@ static CONTROLLING_SESSION_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 const DUR_ONE_DAY: Duration = Duration::from_secs(60 * 60 * 24);
 const UPDATE_DOWNLOAD_RETRY_COUNT: usize = 2;
+const DEFERRED_UPDATE_MESSAGE: &str =
+    "Aggiornamento pronto: verra installato quando non ci sono sessioni attive.";
 
 pub fn set_update_action_state(status: &str, error: &str) {
     *UPDATE_ACTION_STATUS.lock().unwrap() = status.to_owned();
@@ -174,6 +176,13 @@ fn check_update(manually: bool) -> ResultType<()> {
     if has_no_active_conns() {
         #[cfg(target_os = "windows")]
         update_new_version(&manifest, &file_path);
+    } else {
+        set_update_action_state("deferred", DEFERRED_UPDATE_MESSAGE);
+        log::info!(
+            "update install deferred due to active sessions: version={} file={}",
+            manifest.version,
+            file_path.display()
+        );
     }
     Ok(())
 }

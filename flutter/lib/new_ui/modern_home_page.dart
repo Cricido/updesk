@@ -678,10 +678,11 @@ class _ModernHomePageState extends State<ModernHomePage>
       _updateActionError = '';
     });
     await bind.mainSetCommon(key: 'update-me', value: updateUrl);
-    await Future.delayed(const Duration(milliseconds: 300));
-    await _refresh();
+    await _waitForUpdateIdle();
     if (_updateActionStatus == 'installer-launched') {
       showToast('Aggiornamento avviato. UpDesk si chiudera per completare l\'installazione.');
+    } else if (_updateActionStatus == 'deferred') {
+      showToast('Aggiornamento pronto: verra installato quando non ci sono sessioni attive.');
     } else if (_updateActionError.isNotEmpty) {
       showToast(_updateActionError);
     }
@@ -693,12 +694,29 @@ class _ModernHomePageState extends State<ModernHomePage>
       _updateActionError = '';
     });
     bind.mainGetSoftwareUpdateUrl();
-    await Future.delayed(const Duration(seconds: 2));
-    await _refresh();
+    await _waitForUpdateIdle();
     if (_updateActionStatus == 'up-to-date') {
       showToast('Nessun aggiornamento disponibile.');
+    } else if (_updateActionStatus == 'available') {
+      showToast('Nuovo aggiornamento disponibile.');
     } else if (_updateActionError.isNotEmpty) {
       showToast(_updateActionError);
+    }
+  }
+
+  Future<void> _waitForUpdateIdle({
+    Duration timeout = const Duration(seconds: 20),
+  }) async {
+    final start = DateTime.now();
+    while (mounted) {
+      await _refresh();
+      if (!_isUpdateBusy) {
+        return;
+      }
+      if (DateTime.now().difference(start) >= timeout) {
+        return;
+      }
+      await Future.delayed(const Duration(milliseconds: 250));
     }
   }
 
@@ -725,6 +743,8 @@ class _ModernHomePageState extends State<ModernHomePage>
         return 'Preparazione aggiornamento...';
       case 'launching':
         return 'Avvio installer in corso...';
+      case 'deferred':
+        return 'Aggiornamento pronto: installazione rinviata fino a fine sessioni attive.';
       case 'installer-launched':
         return 'Installer avviato correttamente.';
       case 'up-to-date':
