@@ -61,3 +61,4 @@ flutter/web/
 backups/
 tmp_*.py
 stable.test-backup.json
+.secrets/

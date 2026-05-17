@@ -13,6 +13,9 @@ $root = $PSScriptRoot
 $flutter = "C:\Users\cri\Desktop\flutter\flutter\bin\flutter.bat"
 $iscc = "C:\Users\cri\AppData\Local\Programs\Inno Setup 6\ISCC.exe"
 $env:VCPKG_ROOT = "C:\vcpkg"
+$manifestSigner = "$root\tools\update_manifest_sign.py"
+$manifestPrivateKey = "$root\.secrets\updesk-update-sign-private.key"
+$manifestPublicKey = "$root\res\update_manifest_public_key.txt"
 
 Write-Host "`n=== UptimeDesk Release $Version [$Channel] ===" -ForegroundColor Cyan
 
@@ -52,6 +55,15 @@ function Write-UpdateManifest {
 
 if (-not (Test-VersionString -InputVersion $Version)) {
     throw "Formato versione non valido: usare X.Y.Z"
+}
+if (-not (Test-Path $manifestSigner)) {
+    throw "Tool firma manifest non trovato: $manifestSigner"
+}
+if (-not (Test-Path $manifestPrivateKey)) {
+    throw "Chiave privata firma manifest non trovata: $manifestPrivateKey"
+}
+if (-not (Test-Path $manifestPublicKey)) {
+    throw "Chiave pubblica manifest non trovata: $manifestPublicKey"
 }
 
 # 1. Aggiorna versione in Cargo.toml, src/version.rs e flutter/pubspec.yaml
@@ -146,6 +158,18 @@ Write-UpdateManifest -ManifestChannel "stable" -ManifestPath "$root\stable.json"
 $channelManifestPath = "$root\$Channel.json"
 if ($Channel -ne "stable") {
     Write-UpdateManifest -ManifestChannel $Channel -ManifestPath $channelManifestPath -ManifestVersion $Version -ManifestSha256 $hashFull -Mandatory $forceBool -Changelog $Notes
+}
+
+& python $manifestSigner sign --private $manifestPrivateKey --manifest "$root\stable.json"
+if ($LASTEXITCODE -ne 0) { Write-Error "Firma stable.json fallita"; exit 1 }
+& python $manifestSigner verify --public $manifestPublicKey --manifest "$root\stable.json"
+if ($LASTEXITCODE -ne 0) { Write-Error "Verifica stable.json fallita"; exit 1 }
+
+if ($Channel -ne "stable") {
+    & python $manifestSigner sign --private $manifestPrivateKey --manifest $channelManifestPath
+    if ($LASTEXITCODE -ne 0) { Write-Error "Firma $Channel.json fallita"; exit 1 }
+    & python $manifestSigner verify --public $manifestPublicKey --manifest $channelManifestPath
+    if ($LASTEXITCODE -ne 0) { Write-Error "Verifica $Channel.json fallita"; exit 1 }
 }
 
 Write-Host "`n=== Release $Version completata! ===" -ForegroundColor Green

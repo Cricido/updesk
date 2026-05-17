@@ -5,5 +5,6 @@
   "sha256": "eeb96cac4ba18bc10d66c7971d31fbf6a0c60572db2e6ff5ed294b8d80a35b4e",
   "mandatory": false,
   "min_supported": "1.0.0",
-  "changelog": "Build beta per test controllati"
+  "changelog": "Build beta per test controllati",
+  "signature": "jIkyNP9yWMNIHGPmKOz33F0SMhsHRQS/l5byXQCwQXq5Zof79tVNvfT3+Yer6f6F1PUXlJzQ/2BV1tJuMZe9CA=="
 }

@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use url::Url;
+use hbb_common::base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 
 #[cfg(not(target_os = "ios"))]
 use hbb_common::whoami;
@@ -108,6 +109,8 @@ pub const SOFTWARE_UPDATE_RECOMMENDED_MANIFEST_URL: &str =
     "https://updesk.uptimeservice.it/api/v1/update/recommended.json";
 pub const SOFTWARE_UPDATE_BETA_MANIFEST_URL: &str =
     "https://updesk.uptimeservice.it/api/v1/update/beta.json";
+pub const SOFTWARE_UPDATE_MANIFEST_SIGN_PUBLIC_KEY: &str =
+    include_str!("../res/update_manifest_public_key.txt");
 const OPTION_UPDATE_CHANNEL: &str = "update-channel";
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -121,11 +124,67 @@ pub struct SoftwareUpdateManifest {
     #[serde(default)]
     pub sha256: String,
     #[serde(default)]
+    pub signature: String,
+    #[serde(default)]
     pub mandatory: bool,
     #[serde(default)]
     pub min_supported: String,
     #[serde(default)]
     pub changelog: String,
+}
+
+fn canonical_software_update_manifest_payload(resp: &SoftwareUpdateManifest) -> String {
+    let mandatory = if resp.mandatory { "true" } else { "false" };
+    let changelog = resp.changelog.replace("\r\n", "\n").replace('\r', "\n");
+    format!(
+        "channel={}\nversion={}\nurl={}\nsha256={}\nmandatory={}\nmin_supported={}\nchangelog={}\n",
+        resp.channel.trim().to_lowercase(),
+        resp.version.trim(),
+        resp.url.trim(),
+        resp.sha256.trim().to_lowercase(),
+        mandatory,
+        resp.min_supported.trim(),
+        changelog
+    )
+}
+
+fn verify_software_update_manifest_signature_with_public_key(
+    resp: &SoftwareUpdateManifest,
+    public_key_b64: &str,
+) -> hbb_common::ResultType<()> {
+    if public_key_b64.is_empty() {
+        bail!("Invalid update manifest: public signing key is not configured");
+    }
+    let signature_b64 = resp.signature.trim();
+    if signature_b64.is_empty() {
+        bail!("Invalid update manifest: signature is required");
+    }
+    let public_key_raw = BASE64_STANDARD.decode(public_key_b64.as_bytes())
+        .map_err(|e| anyhow!("Invalid update manifest public key: {e}"))?;
+    let signature_raw = BASE64_STANDARD.decode(signature_b64.as_bytes())
+        .map_err(|e| anyhow!("Invalid update manifest signature encoding: {e}"))?;
+    let public_key = sign::PublicKey::from_slice(&public_key_raw)
+        .ok_or_else(|| anyhow!("Invalid update manifest public key length"))?;
+    let signature = sign::Signature::from_bytes(&signature_raw)
+        .map_err(|_| anyhow!("Invalid update manifest signature length"))?;
+    if sign::verify_detached(
+        &signature,
+        canonical_software_update_manifest_payload(resp).as_bytes(),
+        &public_key,
+    ) {
+        Ok(())
+    } else {
+        bail!("Invalid update manifest signature")
+    }
+}
+
+fn verify_software_update_manifest_signature(
+    resp: &SoftwareUpdateManifest,
+) -> hbb_common::ResultType<()> {
+    verify_software_update_manifest_signature_with_public_key(
+        resp,
+        SOFTWARE_UPDATE_MANIFEST_SIGN_PUBLIC_KEY.trim(),
+    )
 }
 
 fn get_software_update_channel() -> String {
@@ -179,6 +238,7 @@ fn validate_software_update_manifest(
     {
         bail!("Invalid update manifest: unsupported min_supported format");
     }
+    verify_software_update_manifest_signature(resp)?;
     Ok(())
 }
 
@@ -2556,18 +2616,24 @@ mod tests {
 
     #[test]
     fn test_validate_software_update_manifest() {
-        let ok = SoftwareUpdateManifest {
+        let (public_key, secret_key) = sign::gen_keypair();
+        let public_key_b64 = BASE64_STANDARD.encode(&public_key.0);
+        let mut ok = SoftwareUpdateManifest {
             channel: "recommended".to_owned(),
             version: "1.0.3".to_owned(),
             url: "https://updesk.uptimeservice.it/releases/windows/updesk-1.0.3.exe"
                 .to_owned(),
             sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 .to_owned(),
+            signature: String::new(),
             mandatory: false,
             min_supported: "1.0.0".to_owned(),
             changelog: "ok".to_owned(),
         };
-        assert!(validate_software_update_manifest(&ok, "recommended").is_ok());
+        let payload = canonical_software_update_manifest_payload(&ok);
+        let signature = sign::sign_detached(payload.as_bytes(), &secret_key);
+        ok.signature = BASE64_STANDARD.encode(signature.as_ref());
+        assert!(verify_software_update_manifest_signature_with_public_key(&ok, &public_key_b64).is_ok());
 
         let mut bad_host = ok.clone();
         bad_host.url = "https://example.com/releases/windows/updesk-1.0.3.exe".to_owned();
@@ -2580,6 +2646,10 @@ mod tests {
         let mut bad_channel = ok.clone();
         bad_channel.channel = "beta".to_owned();
         assert!(validate_software_update_manifest(&bad_channel, "recommended").is_err());
+
+        let mut bad_signature = ok.clone();
+        bad_signature.signature = "abcd".to_owned();
+        assert!(verify_software_update_manifest_signature_with_public_key(&bad_signature, &public_key_b64).is_err());
     }
 
     #[tokio::test]

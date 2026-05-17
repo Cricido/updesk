@@ -6,6 +6,9 @@ import json
 import hashlib
 import re
 from urllib.parse import urlparse
+import base64
+import os
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 
 HOST = "updesk.uptimeservice.it"
@@ -16,6 +19,8 @@ PASSWORD = "Memento@2017"
 ROOT = Path(__file__).resolve().parent
 REMOTE_WEB_ROOT = "/var/www/updesk"
 EXPECTED_HOST = "updesk.uptimeservice.it"
+PUBLIC_KEY_PATH = ROOT / "res" / "update_manifest_public_key.txt"
+PUBLISH_LOCK_PATH = ROOT / ".deploy_updesk_update_assets.lock"
 
 
 def parse_args():
@@ -81,7 +86,35 @@ def validate_manifest(data: dict, expected_channel: str) -> str:
         raise RuntimeError(
             f"invalid manifest release path: expected={expected_path} actual={parsed.path}"
         )
+    signature = str(data.get("signature") or "").strip()
+    if not signature:
+        raise RuntimeError("manifest signature missing")
     return version
+
+
+def canonical_manifest_payload(data: dict) -> bytes:
+    mandatory = "true" if bool(data.get("mandatory")) else "false"
+    changelog = str(data.get("changelog") or "").replace("\r\n", "\n").replace("\r", "\n")
+    payload = (
+        f"channel={str(data.get('channel') or '').strip().lower()}\n"
+        f"version={str(data.get('version') or '').strip()}\n"
+        f"url={str(data.get('url') or '').strip()}\n"
+        f"sha256={str(data.get('sha256') or '').strip().lower()}\n"
+        f"mandatory={mandatory}\n"
+        f"min_supported={str(data.get('min_supported') or '').strip()}\n"
+        f"changelog={changelog}\n"
+    )
+    return payload.encode("utf-8")
+
+
+def verify_manifest_signature(data: dict):
+    if not PUBLIC_KEY_PATH.exists():
+        raise RuntimeError(f"manifest public key not found: {PUBLIC_KEY_PATH}")
+    public_key = Ed25519PublicKey.from_public_bytes(
+        base64.b64decode(PUBLIC_KEY_PATH.read_text(encoding="utf-8").strip())
+    )
+    signature = base64.b64decode(str(data.get("signature") or "").strip())
+    public_key.verify(signature, canonical_manifest_payload(data))
 
 
 def parse_version_from_manifest(local_manifest: Path, expected_channel: str) -> tuple[str, dict]:
@@ -102,13 +135,39 @@ def require_ok(name: str, code: int, out: str, err: str):
         raise RuntimeError(f"{name} failed with exit code {code}")
 
 
+def acquire_publish_lock():
+    try:
+        fd = os.open(str(PUBLISH_LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode("ascii", errors="ignore"))
+        return fd
+    except FileExistsError as exc:
+        raise RuntimeError(
+            f"publish lock already held: {PUBLISH_LOCK_PATH}. "
+            "Run channel publish jobs sequentially."
+        ) from exc
+
+
+def release_publish_lock(fd: int | None):
+    if fd is None:
+        return
+    try:
+        os.close(fd)
+    finally:
+        try:
+            PUBLISH_LOCK_PATH.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def main():
+    lock_fd = acquire_publish_lock()
     args = parse_args()
     local_manifest = ROOT / f"{args.channel}.json"
     if not local_manifest.exists():
         raise RuntimeError(f"manifest not found: {local_manifest}")
 
     version, local_manifest_data = parse_version_from_manifest(local_manifest, args.channel)
+    verify_manifest_signature(local_manifest_data)
     local_installer = ROOT / f"UptimeDesk-{version}-x86_64-Setup.exe"
     if not local_installer.exists():
         raise RuntimeError(f"installer not found: {local_installer}")
@@ -123,19 +182,19 @@ def main():
     remote_manifest = f"{REMOTE_WEB_ROOT}/api/v1/update/{args.channel}.json"
     remote_installer = f"{REMOTE_WEB_ROOT}/releases/windows/updesk-{version}.exe"
 
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(
-        HOST,
-        port=PORT,
-        username=USERNAME,
-        password=PASSWORD,
-        timeout=20,
-        banner_timeout=20,
-        auth_timeout=20,
-    )
-    sftp = client.open_sftp()
     try:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            HOST,
+            port=PORT,
+            username=USERNAME,
+            password=PASSWORD,
+            timeout=20,
+            banner_timeout=20,
+            auth_timeout=20,
+        )
+        sftp = client.open_sftp()
         code, out, err = run(
             client,
             "echo 'Memento@2017' | sudo -S mkdir -p "
@@ -194,13 +253,18 @@ def main():
             raise RuntimeError("published manifest body is empty")
         remote_manifest_data = json.loads(manifest_body)
         validate_manifest(remote_manifest_data, args.channel)
+        verify_manifest_signature(remote_manifest_data)
         if str(remote_manifest_data.get("sha256") or "").strip().lower() != local_installer_sha256:
             raise RuntimeError("published manifest sha256 does not match uploaded installer")
         if str(remote_manifest_data.get("channel") or "").strip().lower() != args.channel:
             raise RuntimeError("published manifest channel does not match requested channel")
     finally:
-        sftp.close()
-        client.close()
+        try:
+            sftp.close()
+            client.close()
+        except UnboundLocalError:
+            pass
+        release_publish_lock(lock_fd)
 
 
 if __name__ == "__main__":

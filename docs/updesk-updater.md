@@ -22,6 +22,7 @@ channels.
   "version": "1.0.2",
   "url": "https://updesk.uptimeservice.it/releases/windows/updesk-1.0.2.exe",
   "sha256": "INSERIRE_HASH_REALE",
+  "signature": "INSERIRE_FIRMA_ED25519_BASE64",
   "mandatory": false,
   "min_supported": "1.0.0",
   "changelog": "Bug fix e miglioramenti stabilita"
@@ -87,10 +88,35 @@ The client accepts a manifest only if:
 - `url` host is exactly `updesk.uptimeservice.it`
 - `url` path is under `/releases/windows/`
 - `sha256` is a 64-character hex string
+- `signature` is a valid Ed25519 detached signature in base64
 - `min_supported`, if present, uses the same simple version format
 
 If `min_supported` is greater than the currently installed version, the update
 is automatically treated as mandatory.
+
+## Manifest signing
+
+Update manifests are signed with Ed25519.
+
+- Public key committed in repo:
+  - `res/update_manifest_public_key.txt`
+- Private key kept outside git:
+  - `.secrets/updesk-update-sign-private.key`
+- Signing tool:
+  - `tools/update_manifest_sign.py`
+
+Generate a keypair once:
+
+```powershell
+python .\tools\update_manifest_sign.py keygen --private .secrets\updesk-update-sign-private.key --public res\update_manifest_public_key.txt
+```
+
+Sign and verify a manifest manually:
+
+```powershell
+python .\tools\update_manifest_sign.py sign --private .secrets\updesk-update-sign-private.key --manifest .\stable.json
+python .\tools\update_manifest_sign.py verify --public .\res\update_manifest_public_key.txt --manifest .\stable.json
+```
 
 ## Logging
 
@@ -142,9 +168,14 @@ python .\deploy_updesk_update_assets.py --channel recommended
 python .\deploy_updesk_update_assets.py --channel beta
 ```
 
+Publish channels sequentially, not in parallel. All channels point to the same
+installer path on the server and the publish script now enforces a local lock
+to prevent overlapping uploads.
+
 It will:
 
 - validate the selected channel manifest locally
+- validate the manifest signature locally
 - validate that the manifest SHA256 matches the local installer
 - upload the selected channel manifest
 - upload `UptimeDesk-<version>-x86_64-Setup.exe`
@@ -192,6 +223,8 @@ The release script:
 - builds Flutter Windows
 - builds the installers
 - computes SHA256
+- signs `stable.json` and the selected channel manifest
+- verifies manifest signatures before completing
 - writes:
   - `stable.json`
   - `<channel>.json`
