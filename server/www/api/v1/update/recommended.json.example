@@ -1,0 +1,9 @@
+{
+  "channel": "recommended",
+  "version": "1.0.3",
+  "url": "https://updesk.uptimeservice.it/releases/windows/updesk-1.0.3.exe",
+  "sha256": "INSERIRE_HASH_REALE",
+  "mandatory": false,
+  "min_supported": "1.0.0",
+  "changelog": "Miglioramenti consigliati per stabilita e aggiornamenti."
+}

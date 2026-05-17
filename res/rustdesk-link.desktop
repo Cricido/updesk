@@ -1,0 +1,11 @@
+﻿[Desktop Entry]
+Name=UptimeDesk
+NoDisplay=true
+MimeType=x-scheme-handler/rustdesk;
+TryExec=uptimedesk
+Exec=uptimedesk %u
+Icon=uptimedesk
+Terminal=false
+Type=Application
+StartupNotify=false
+StartupWMClass=uptimedesk

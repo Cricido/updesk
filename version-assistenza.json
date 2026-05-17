@@ -1,0 +1,7 @@
+{
+  "version": "1.0.2",
+  "url": "https://updesk.uptimeservice.it/download/UptimeDesk-Assistenza-Setup.exe",
+  "sha256": "14c8f0c03a881309d196649b076a0df02743ce75bd84bdcf8cf5298731b46087",
+  "force": false,
+  "notes_it": "Migrazione server relay a updesk.uptimeservice.it"
+}

@@ -1,0 +1,14 @@
+[Unit]
+Description=UptimeDesk WebSocket-TCP Bridge (ws/id → hbbs 21116)
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/updesk-bridge/ws_hbbs_bridge.py
+Restart=always
+RestartSec=5
+User=nobody
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,505 @@
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    println,
+};
+
+#[cfg(all(target_os = "linux", feature = "linux-pkg-config"))]
+fn link_pkg_config(name: &str) -> Vec<PathBuf> {
+    // sometimes an override is needed
+    let pc_name = match name {
+        "libvpx" => "vpx",
+        _ => name,
+    };
+    let lib = pkg_config::probe_library(pc_name)
+        .expect(format!(
+            "unable to find '{pc_name}' development headers with pkg-config (feature linux-pkg-config is enabled).
+            try installing '{pc_name}-dev' from your system package manager.").as_str());
+
+    lib.include_paths
+}
+#[cfg(not(all(target_os = "linux", feature = "linux-pkg-config")))]
+fn link_pkg_config(_name: &str) -> Vec<PathBuf> {
+    unimplemented!()
+}
+
+/// Link vcpkg package.
+fn link_vcpkg(mut path: PathBuf, name: &str) -> PathBuf {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
+    let mut target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+    if target_arch == "x86_64" {
+        target_arch = "x64".to_owned();
+    } else if target_arch == "x86" {
+        target_arch = "x86".to_owned();
+    } else if target_arch == "loongarch64" {
+        target_arch = "loongarch64".to_owned();
+    } else if target_arch == "aarch64" {
+        target_arch = "arm64".to_owned();
+    } else {
+        target_arch = "arm".to_owned();
+    }
+    let mut target = if target_os == "macos" {
+        if target_arch == "x64" {
+            "x64-osx".to_owned()
+        } else if target_arch == "arm64" {
+            "arm64-osx".to_owned()
+        } else {
+            format!("{}-{}", target_arch, target_os)
+        }
+    } else if target_os == "windows" {
+        "x64-windows-static".to_owned()
+    } else {
+        format!("{}-{}", target_arch, target_os)
+    };
+    if target_arch == "x86" {
+        target = target.replace("x64", "x86");
+    }
+    println!("cargo:info={}", target);
+    if let Ok(vcpkg_root) = std::env::var("VCPKG_INSTALLED_ROOT") {
+        path = vcpkg_root.into();
+    } else {
+        path.push("installed");
+    }
+    path.push(target);
+    println!(
+        "cargo:rustc-link-lib=static={}",
+        name.trim_start_matches("lib")
+    );
+    println!(
+        "cargo:rustc-link-search={}",
+        path.join("lib").to_str().unwrap()
+    );
+    let include = path.join("include");
+    println!("cargo:include={}", include.to_str().unwrap());
+    include
+}
+
+/// Link homebrew package(for Mac M1).
+fn link_homebrew_m1(name: &str) -> PathBuf {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+    if target_os != "macos" || target_arch != "aarch64" {
+        panic!("Couldn't find VCPKG_ROOT, also can't fallback to homebrew because it's only for macos aarch64.");
+    }
+    let mut path = PathBuf::from("/opt/homebrew/Cellar");
+    path.push(name);
+    let entries = if let Ok(dir) = std::fs::read_dir(&path) {
+        dir
+    } else {
+        panic!("Could not find package in {}. Make sure your homebrew and package {} are all installed.", path.to_str().unwrap(),&name);
+    };
+    let mut directories = entries
+        .into_iter()
+        .filter(|x| x.is_ok())
+        .map(|x| x.unwrap().path())
+        .filter(|x| x.is_dir())
+        .collect::<Vec<_>>();
+    // Find the newest version.
+    directories.sort_unstable();
+    if directories.is_empty() {
+        panic!(
+            "There's no installed version of {} in /opt/homebrew/Cellar",
+            name
+        );
+    }
+    path.push(directories.pop().unwrap());
+    // Link the library.
+    println!(
+        "cargo:rustc-link-lib=static={}",
+        name.trim_start_matches("lib")
+    );
+    // Add the library path.
+    println!(
+        "cargo:rustc-link-search={}",
+        path.join("lib").to_str().unwrap()
+    );
+    // Add the include path.
+    let include = path.join("include");
+    println!("cargo:include={}", include.to_str().unwrap());
+    include
+}
+
+/// Find package. By default, it will try to find vcpkg first, then homebrew(currently only for Mac M1).
+/// If building for linux and feature "linux-pkg-config" is enabled, will try to use pkg-config
+/// unless check fails (e.g. NO_PKG_CONFIG_libyuv=1)
+fn find_package(name: &str) -> Vec<PathBuf> {
+    let no_pkg_config_var_name = format!("NO_PKG_CONFIG_{name}");
+    println!("cargo:rerun-if-env-changed={no_pkg_config_var_name}");
+    if cfg!(all(target_os = "linux", feature = "linux-pkg-config"))
+        && std::env::var(no_pkg_config_var_name).as_deref() != Ok("1")
+    {
+        link_pkg_config(name)
+    } else if let Ok(vcpkg_root) = std::env::var("VCPKG_ROOT") {
+        vec![link_vcpkg(vcpkg_root.into(), name)]
+    } else {
+        // Try using homebrew
+        vec![link_homebrew_m1(name)]
+    }
+}
+
+const VPX_DEC_CFG_DEF: &str = r#"#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct vpx_codec_dec_cfg {
+    pub threads: ::std::os::raw::c_uint,
+    pub w: ::std::os::raw::c_uint,
+    pub h: ::std::os::raw::c_uint,
+}"#;
+
+const VPX_ENC_CFG_DEF: &str = r#"#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct vpx_codec_enc_cfg {
+    pub g_usage: ::std::os::raw::c_uint,
+    pub g_threads: ::std::os::raw::c_uint,
+    pub g_profile: ::std::os::raw::c_uint,
+    pub g_w: ::std::os::raw::c_uint,
+    pub g_h: ::std::os::raw::c_uint,
+    pub g_bit_depth: vpx_bit_depth,
+    pub g_input_bit_depth: ::std::os::raw::c_uint,
+    pub g_timebase: vpx_rational,
+    pub g_error_resilient: vpx_codec_er_flags_t,
+    pub g_pass: vpx_enc_pass,
+    pub g_lag_in_frames: ::std::os::raw::c_uint,
+    pub rc_dropframe_thresh: ::std::os::raw::c_uint,
+    pub rc_resize_allowed: ::std::os::raw::c_uint,
+    pub rc_scaled_width: ::std::os::raw::c_uint,
+    pub rc_scaled_height: ::std::os::raw::c_uint,
+    pub rc_resize_up_thresh: ::std::os::raw::c_uint,
+    pub rc_resize_down_thresh: ::std::os::raw::c_uint,
+    pub rc_end_usage: vpx_rc_mode,
+    pub rc_twopass_stats_in: vpx_fixed_buf,
+    pub rc_firstpass_mb_stats_in: vpx_fixed_buf,
+    pub rc_target_bitrate: ::std::os::raw::c_uint,
+    pub rc_min_quantizer: ::std::os::raw::c_uint,
+    pub rc_max_quantizer: ::std::os::raw::c_uint,
+    pub rc_undershoot_pct: ::std::os::raw::c_uint,
+    pub rc_overshoot_pct: ::std::os::raw::c_uint,
+    pub rc_buf_sz: ::std::os::raw::c_uint,
+    pub rc_buf_initial_sz: ::std::os::raw::c_uint,
+    pub rc_buf_optimal_sz: ::std::os::raw::c_uint,
+    pub rc_2pass_vbr_bias_pct: ::std::os::raw::c_uint,
+    pub rc_2pass_vbr_minsection_pct: ::std::os::raw::c_uint,
+    pub rc_2pass_vbr_maxsection_pct: ::std::os::raw::c_uint,
+    pub rc_2pass_vbr_corpus_complexity: ::std::os::raw::c_uint,
+    pub kf_mode: vpx_kf_mode,
+    pub kf_min_dist: ::std::os::raw::c_uint,
+    pub kf_max_dist: ::std::os::raw::c_uint,
+    pub ss_number_layers: ::std::os::raw::c_uint,
+    pub ss_enable_auto_alt_ref: [::std::os::raw::c_int; 5usize],
+    pub ss_target_bitrate: [::std::os::raw::c_uint; 5usize],
+    pub ts_number_layers: ::std::os::raw::c_uint,
+    pub ts_target_bitrate: [::std::os::raw::c_uint; 5usize],
+    pub ts_rate_decimator: [::std::os::raw::c_uint; 5usize],
+    pub ts_periodicity: ::std::os::raw::c_uint,
+    pub ts_layer_id: [::std::os::raw::c_uint; 16usize],
+    pub layer_target_bitrate: [::std::os::raw::c_uint; 12usize],
+    pub temporal_layering_mode: ::std::os::raw::c_int,
+    pub use_vizier_rc_params: ::std::os::raw::c_int,
+    pub active_wq_factor: vpx_rational,
+    pub err_per_mb_factor: vpx_rational,
+    pub sr_default_decay_limit: vpx_rational,
+    pub sr_diff_factor: vpx_rational,
+    pub kf_err_per_mb_factor: vpx_rational,
+    pub kf_frame_min_boost_factor: vpx_rational,
+    pub kf_frame_max_boost_first_factor: vpx_rational,
+    pub kf_frame_max_boost_subs_factor: vpx_rational,
+    pub kf_max_total_boost_factor: vpx_rational,
+    pub gf_max_total_boost_factor: vpx_rational,
+    pub gf_frame_max_boost_factor: vpx_rational,
+    pub zm_factor: vpx_rational,
+    pub rd_mult_inter_qp_fac: vpx_rational,
+    pub rd_mult_arf_qp_fac: vpx_rational,
+    pub rd_mult_key_qp_fac: vpx_rational,
+}"#;
+
+const AOM_DEC_CFG_DEF: &str = r#"#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct aom_codec_dec_cfg {
+    pub threads: ::std::os::raw::c_uint,
+    pub w: ::std::os::raw::c_uint,
+    pub h: ::std::os::raw::c_uint,
+    pub allow_lowbitdepth: ::std::os::raw::c_uint,
+}"#;
+
+const CFG_OPTIONS_DEF: &str = r#"#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct cfg_options_t {
+    pub init_by_cfg_file: ::std::os::raw::c_uint,
+    pub super_block_size: ::std::os::raw::c_uint,
+    pub max_partition_size: ::std::os::raw::c_uint,
+    pub min_partition_size: ::std::os::raw::c_uint,
+    pub disable_ab_partition_type: ::std::os::raw::c_uint,
+    pub disable_rect_partition_type: ::std::os::raw::c_uint,
+    pub disable_1to4_partition_type: ::std::os::raw::c_uint,
+    pub disable_flip_idtx: ::std::os::raw::c_uint,
+    pub disable_cdef: ::std::os::raw::c_uint,
+    pub disable_lr: ::std::os::raw::c_uint,
+    pub disable_obmc: ::std::os::raw::c_uint,
+    pub disable_warp_motion: ::std::os::raw::c_uint,
+    pub disable_global_motion: ::std::os::raw::c_uint,
+    pub disable_dist_wtd_comp: ::std::os::raw::c_uint,
+    pub disable_diff_wtd_comp: ::std::os::raw::c_uint,
+    pub disable_inter_intra_comp: ::std::os::raw::c_uint,
+    pub disable_masked_comp: ::std::os::raw::c_uint,
+    pub disable_one_sided_comp: ::std::os::raw::c_uint,
+    pub disable_palette: ::std::os::raw::c_uint,
+    pub disable_intrabc: ::std::os::raw::c_uint,
+    pub disable_cfl: ::std::os::raw::c_uint,
+    pub disable_smooth_intra: ::std::os::raw::c_uint,
+    pub disable_filter_intra: ::std::os::raw::c_uint,
+    pub disable_dual_filter: ::std::os::raw::c_uint,
+    pub disable_intra_angle_delta: ::std::os::raw::c_uint,
+    pub disable_intra_edge_filter: ::std::os::raw::c_uint,
+    pub disable_tx_64x64: ::std::os::raw::c_uint,
+    pub disable_smooth_inter_intra: ::std::os::raw::c_uint,
+    pub disable_inter_inter_wedge: ::std::os::raw::c_uint,
+    pub disable_inter_intra_wedge: ::std::os::raw::c_uint,
+    pub disable_paeth_intra: ::std::os::raw::c_uint,
+    pub disable_trellis_quant: ::std::os::raw::c_uint,
+    pub disable_ref_frame_mv: ::std::os::raw::c_uint,
+    pub reduced_reference_set: ::std::os::raw::c_uint,
+    pub reduced_tx_type_set: ::std::os::raw::c_uint,
+}"#;
+
+const AOM_ENC_CFG_DEF: &str = r#"#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct aom_codec_enc_cfg {
+    pub g_usage: ::std::os::raw::c_uint,
+    pub g_threads: ::std::os::raw::c_uint,
+    pub g_profile: ::std::os::raw::c_uint,
+    pub g_w: ::std::os::raw::c_uint,
+    pub g_h: ::std::os::raw::c_uint,
+    pub g_limit: ::std::os::raw::c_uint,
+    pub g_forced_max_frame_width: ::std::os::raw::c_uint,
+    pub g_forced_max_frame_height: ::std::os::raw::c_uint,
+    pub g_bit_depth: aom_bit_depth,
+    pub g_input_bit_depth: ::std::os::raw::c_uint,
+    pub g_timebase: aom_rational,
+    pub g_error_resilient: aom_codec_er_flags_t,
+    pub g_pass: aom_enc_pass,
+    pub g_lag_in_frames: ::std::os::raw::c_uint,
+    pub rc_dropframe_thresh: ::std::os::raw::c_uint,
+    pub rc_resize_mode: ::std::os::raw::c_uint,
+    pub rc_resize_denominator: ::std::os::raw::c_uint,
+    pub rc_resize_kf_denominator: ::std::os::raw::c_uint,
+    pub rc_superres_mode: aom_superres_mode,
+    pub rc_superres_denominator: ::std::os::raw::c_uint,
+    pub rc_superres_kf_denominator: ::std::os::raw::c_uint,
+    pub rc_superres_qthresh: ::std::os::raw::c_uint,
+    pub rc_superres_kf_qthresh: ::std::os::raw::c_uint,
+    pub rc_end_usage: aom_rc_mode,
+    pub rc_twopass_stats_in: aom_fixed_buf,
+    pub rc_firstpass_mb_stats_in: aom_fixed_buf,
+    pub rc_target_bitrate: ::std::os::raw::c_uint,
+    pub rc_min_quantizer: ::std::os::raw::c_uint,
+    pub rc_max_quantizer: ::std::os::raw::c_uint,
+    pub rc_undershoot_pct: ::std::os::raw::c_uint,
+    pub rc_overshoot_pct: ::std::os::raw::c_uint,
+    pub rc_buf_sz: ::std::os::raw::c_uint,
+    pub rc_buf_initial_sz: ::std::os::raw::c_uint,
+    pub rc_buf_optimal_sz: ::std::os::raw::c_uint,
+    pub rc_2pass_vbr_bias_pct: ::std::os::raw::c_uint,
+    pub rc_2pass_vbr_minsection_pct: ::std::os::raw::c_uint,
+    pub rc_2pass_vbr_maxsection_pct: ::std::os::raw::c_uint,
+    pub fwd_kf_enabled: ::std::os::raw::c_int,
+    pub kf_mode: aom_kf_mode,
+    pub kf_min_dist: ::std::os::raw::c_uint,
+    pub kf_max_dist: ::std::os::raw::c_uint,
+    pub sframe_dist: ::std::os::raw::c_uint,
+    pub sframe_mode: ::std::os::raw::c_uint,
+    pub large_scale_tile: ::std::os::raw::c_uint,
+    pub monochrome: ::std::os::raw::c_uint,
+    pub full_still_picture_hdr: ::std::os::raw::c_uint,
+    pub save_as_annexb: ::std::os::raw::c_uint,
+    pub tile_width_count: ::std::os::raw::c_int,
+    pub tile_height_count: ::std::os::raw::c_int,
+    pub tile_widths: [::std::os::raw::c_int; 64usize],
+    pub tile_heights: [::std::os::raw::c_int; 64usize],
+    pub use_fixed_qp_offsets: ::std::os::raw::c_uint,
+    pub fixed_qp_offsets: [::std::os::raw::c_int; 5usize],
+    pub encoder_cfg: cfg_options_t,
+}"#;
+
+fn patch_bindings(path: &Path) {
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    // Normalize to LF so pattern matching works regardless of line endings
+    let mut patched = content.replace("\r\n", "\n");
+
+    let opaque_vpx_dec = "#[repr(C)]\n#[derive(Debug, Copy, Clone)]\npub struct vpx_codec_dec_cfg {\n    pub _address: u8,\n}";
+    if patched.contains(opaque_vpx_dec) {
+        patched = patched.replace(opaque_vpx_dec, VPX_DEC_CFG_DEF);
+    }
+
+    let opaque_vpx_enc = "#[repr(C)]\n#[derive(Debug, Copy, Clone)]\npub struct vpx_codec_enc_cfg {\n    pub _address: u8,\n}";
+    if patched.contains(opaque_vpx_enc) {
+        patched = patched.replace(opaque_vpx_enc, VPX_ENC_CFG_DEF);
+    }
+
+    let opaque_aom_dec = "#[repr(C)]\n#[derive(Debug, Copy, Clone)]\npub struct aom_codec_dec_cfg {\n    pub _address: u8,\n}";
+    if patched.contains(opaque_aom_dec) {
+        patched = patched.replace(opaque_aom_dec, AOM_DEC_CFG_DEF);
+    }
+
+    let opaque_aom_enc = "#[repr(C)]\n#[derive(Debug, Copy, Clone)]\npub struct aom_codec_enc_cfg {\n    pub _address: u8,\n}";
+    if patched.contains(opaque_aom_enc) {
+        let replacement = format!("{}\n{}", CFG_OPTIONS_DEF, AOM_ENC_CFG_DEF);
+        patched = patched.replace(opaque_aom_enc, &replacement);
+    }
+
+    // Write if content changed or if we normalized CRLF
+    let original_normalized = content.replace("\r\n", "\n");
+    if patched != original_normalized {
+        let _ = fs::write(path, patched);
+    }
+}
+
+fn generate_bindings(
+    ffi_header: &Path,
+    include_paths: &[PathBuf],
+    ffi_rs: &Path,
+    exact_file: &Path,
+    regex: &str,
+) {
+    let mut b = bindgen::builder()
+        .header(ffi_header.to_str().unwrap())
+        .allowlist_type(regex)
+        .allowlist_var(regex)
+        .allowlist_function(regex)
+        .rustified_enum(regex)
+        .trust_clang_mangling(false)
+        .layout_tests(false) // breaks 32/64-bit compat
+        .generate_comments(false) // comments have prefix /*!\
+        .clang_arg("--target=x86_64-pc-windows-msvc");
+
+    for dir in include_paths {
+        b = b.clang_arg(format!("-I{}", dir.display()));
+    }
+
+    // Add MSVC system include paths so clang can resolve Windows types
+    let msvc_include = std::path::Path::new(
+        "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207/include"
+    );
+    if msvc_include.exists() {
+        b = b.clang_arg(format!("-I{}", msvc_include.display()));
+    }
+    let ucrt_include =
+        std::path::Path::new("C:/Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/ucrt");
+    if ucrt_include.exists() {
+        b = b.clang_arg(format!("-I{}", ucrt_include.display()));
+    }
+    let sdk_include =
+        std::path::Path::new("C:/Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/shared");
+    if sdk_include.exists() {
+        b = b.clang_arg(format!("-I{}", sdk_include.display()));
+    }
+
+    b.generate().unwrap().write_to_file(ffi_rs).unwrap();
+    patch_bindings(ffi_rs);
+    fs::copy(ffi_rs, exact_file).ok(); // ignore failure
+}
+
+fn gen_vcpkg_package(package: &str, ffi_header: &str, generated: &str, regex: &str) {
+    let includes = find_package(package);
+    let src_dir = env::var_os("CARGO_MANIFEST_DIR").unwrap();
+    let src_dir = Path::new(&src_dir);
+    let out_dir = env::var_os("OUT_DIR").unwrap();
+    let out_dir = Path::new(&out_dir);
+
+    let ffi_header = src_dir.join("src").join("bindings").join(ffi_header);
+    println!("rerun-if-changed={}", ffi_header.display());
+    for dir in &includes {
+        println!("rerun-if-changed={}", dir.display());
+    }
+
+    let ffi_rs = out_dir.join(generated);
+    let exact_file = src_dir.join("generated").join(generated);
+    generate_bindings(&ffi_header, &includes, &ffi_rs, &exact_file, regex);
+}
+
+// If you have problems installing ffmpeg, you can download $VCPKG_ROOT/installed from ci
+// Linux require link in hwcodec
+/*
+fn ffmpeg() {
+    // ffmpeg
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+    let static_libs = vec!["avcodec", "avutil", "avformat"];
+    static_libs.iter().for_each(|lib| {
+        find_package(lib);
+    });
+    if target_os == "windows" {
+        println!("cargo:rustc-link-lib=static=libmfx");
+    }
+
+    // os
+    let dyn_libs: Vec<&str> = if target_os == "windows" {
+        ["User32", "bcrypt", "ole32", "advapi32"].to_vec()
+    } else if target_os == "linux" {
+        let mut v = ["va", "va-drm", "va-x11", "vdpau", "X11", "stdc++"].to_vec();
+        if target_arch == "x86_64" {
+            v.push("z");
+        }
+        v
+    } else if target_os == "macos" || target_os == "ios" {
+        ["c++", "m"].to_vec()
+    } else if target_os == "android" {
+        ["z", "m", "android", "atomic"].to_vec()
+    } else {
+        panic!("unsupported os");
+    };
+    dyn_libs
+        .iter()
+        .map(|lib| println!("cargo:rustc-link-lib={}", lib))
+        .count();
+
+    if target_os == "macos" || target_os == "ios" {
+        println!("cargo:rustc-link-lib=framework=CoreFoundation");
+        println!("cargo:rustc-link-lib=framework=CoreVideo");
+        println!("cargo:rustc-link-lib=framework=CoreMedia");
+        println!("cargo:rustc-link-lib=framework=VideoToolbox");
+        println!("cargo:rustc-link-lib=framework=AVFoundation");
+    }
+}
+*/
+
+fn main() {
+    // in this crate, these are also valid configurations
+    println!("cargo:rustc-check-cfg=cfg(dxgi,quartz,x11)");
+
+    // there is problem with cfg(target_os) in build.rs, so use our workaround
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
+
+    // note: all link symbol names in x86 (32-bit) are prefixed wth "_".
+    // run "rustup show" to show current default toolchain, if it is stable-x86-pc-windows-msvc,
+    // please install x64 toolchain by "rustup toolchain install stable-x86_64-pc-windows-msvc",
+    // then set x64 to default by "rustup default stable-x86_64-pc-windows-msvc"
+    let target = target_build_utils::TargetInfo::new();
+    if target.unwrap().target_pointer_width() != "64" {
+        // panic!("Only support 64bit system");
+    }
+    env::remove_var("CARGO_CFG_TARGET_FEATURE");
+    env::set_var("CARGO_CFG_TARGET_FEATURE", "crt-static");
+
+    find_package("libyuv");
+    gen_vcpkg_package("libvpx", "vpx_ffi.h", "vpx_ffi.rs", "^[vV].*");
+    gen_vcpkg_package("aom", "aom_ffi.h", "aom_ffi.rs", "^(aom|AOM|OBU|AV1).*");
+    gen_vcpkg_package("libyuv", "yuv_ffi.h", "yuv_ffi.rs", ".*");
+    // ffmpeg();
+
+    if target_os == "ios" {
+        // nothing
+    } else if target_os == "android" {
+        println!("cargo:rustc-cfg=android");
+    } else if cfg!(windows) {
+        // The first choice is Windows because DXGI is amazing.
+        println!("cargo:rustc-cfg=dxgi");
+    } else if cfg!(target_os = "macos") {
+        // Quartz is second because macOS is the (annoying) exception.
+        println!("cargo:rustc-cfg=quartz");
+    } else if cfg!(unix) {
+        // On UNIX we pray that X11 (with XCB) is available.
+        println!("cargo:rustc-cfg=x11");
+    }
+}

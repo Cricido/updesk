@@ -1,0 +1,9 @@
+{
+  "channel": "beta",
+  "version": "1.0.4",
+  "url": "https://updesk.uptimeservice.it/releases/windows/updesk-1.0.4.exe",
+  "sha256": "INSERIRE_HASH_REALE",
+  "mandatory": false,
+  "min_supported": "1.0.0",
+  "changelog": "Build beta per test controllati."
+}

@@ -1,0 +1,6 @@
+;!@Install@!UTF-8!
+Title="UptimeDesk Assistenza"
+BeginPrompt="Installare UptimeDesk Assistenza?\nPermette al tecnico di collegarsi al tuo computer."
+RunProgram="uptimedesk.exe --assist"
+GUIMode="2"
+;!@InstallEnd@!

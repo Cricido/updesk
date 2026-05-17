@@ -1,0 +1,45 @@
+server {
+    listen 443 ssl http2;
+    server_name updesk.uptimeservice.it;
+
+    # TLS config intentionally omitted here.
+
+    location /ws/id {
+        proxy_pass http://127.0.0.1:21121;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
+
+    location /ws/relay {
+        proxy_pass http://127.0.0.1:21129;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
+
+    location /api/ {
+        root /var/www/updesk;
+        default_type application/json;
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+        try_files $uri =404;
+    }
+
+    location /releases/ {
+        root /var/www/updesk;
+        add_header Cache-Control "public, max-age=300";
+        try_files $uri =404;
+    }
+
+    location = / {
+        return 404;
+    }
+}
