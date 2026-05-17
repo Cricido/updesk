@@ -16,6 +16,11 @@ $env:VCPKG_ROOT = "C:\vcpkg"
 
 Write-Host "`n=== UptimeDesk Release $Version [$Channel] ===" -ForegroundColor Cyan
 
+function Test-VersionString {
+    param([Parameter(Mandatory)][string]$InputVersion)
+    return $InputVersion -match '^\d+\.\d+\.\d+$'
+}
+
 function Write-JsonFile {
     param(
         [Parameter(Mandatory)]$Data,
@@ -23,6 +28,30 @@ function Write-JsonFile {
     )
     $json = $Data | ConvertTo-Json -Depth 8
     [System.IO.File]::WriteAllText($Path, $json, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Write-UpdateManifest {
+    param(
+        [Parameter(Mandatory)][string]$ManifestChannel,
+        [Parameter(Mandatory)][string]$ManifestPath,
+        [Parameter(Mandatory)][string]$ManifestVersion,
+        [Parameter(Mandatory)][string]$ManifestSha256,
+        [Parameter(Mandatory)][bool]$Mandatory,
+        [Parameter(Mandatory)][string]$Changelog
+    )
+    Write-JsonFile -Path $ManifestPath -Data @{
+      channel = $ManifestChannel
+      version = $ManifestVersion
+      url = "https://updesk.uptimeservice.it/releases/windows/updesk-$ManifestVersion.exe"
+      sha256 = $ManifestSha256
+      mandatory = $Mandatory
+      min_supported = "1.0.0"
+      changelog = $(if ([string]::IsNullOrWhiteSpace($Changelog)) { "Maintenance release" } else { $Changelog })
+    }
+}
+
+if (-not (Test-VersionString -InputVersion $Version)) {
+    throw "Formato versione non valido: usare X.Y.Z"
 }
 
 # 1. Aggiorna versione in Cargo.toml, src/version.rs e flutter/pubspec.yaml
@@ -88,6 +117,9 @@ Write-Host "[6/6] Aggiorno manifest update..." -ForegroundColor Yellow
 $fullExe = "$root\UptimeDesk-$Version-x86_64-Setup.exe"
 $assistExe = "$root\UptimeDesk-Assistenza-Setup.exe"
 
+if (-not (Test-Path $fullExe)) { throw "Installer full non trovato: $fullExe" }
+if (-not (Test-Path $assistExe)) { throw "Installer assistenza non trovato: $assistExe" }
+
 $hashFull = (Get-FileHash $fullExe -Algorithm SHA256).Hash.ToLower()
 $hashAssist = (Get-FileHash $assistExe -Algorithm SHA256).Hash.ToLower()
 
@@ -109,31 +141,26 @@ Write-JsonFile -Path "$root\version-assistenza.json" -Data @{
   notes_it = $Notes
 }
 
-Write-JsonFile -Path "$root\stable.json" -Data @{
-  channel = "stable"
-  version = $Version
-  url = "https://updesk.uptimeservice.it/releases/windows/updesk-$Version.exe"
-  sha256 = $hashFull
-  mandatory = $forceBool
-  min_supported = "1.0.0"
-  changelog = $Notes
-}
+Write-UpdateManifest -ManifestChannel "stable" -ManifestPath "$root\stable.json" -ManifestVersion $Version -ManifestSha256 $hashFull -Mandatory $forceBool -Changelog $Notes
 
 $channelManifestPath = "$root\$Channel.json"
-Write-JsonFile -Path $channelManifestPath -Data @{
-  channel = $Channel
-  version = $Version
-  url = "https://updesk.uptimeservice.it/releases/windows/updesk-$Version.exe"
-  sha256 = $hashFull
-  mandatory = $forceBool
-  min_supported = "1.0.0"
-  changelog = $Notes
+if ($Channel -ne "stable") {
+    Write-UpdateManifest -ManifestChannel $Channel -ManifestPath $channelManifestPath -ManifestVersion $Version -ManifestSha256 $hashFull -Mandatory $forceBool -Changelog $Notes
 }
 
 Write-Host "`n=== Release $Version completata! ===" -ForegroundColor Green
 Write-Host ""
+Write-Host "Manifest generati:" -ForegroundColor Cyan
+Write-Host "  stable.json"
+if ($Channel -ne "stable") {
+    Write-Host "  $Channel.json"
+}
+Write-Host ""
 Write-Host "File da caricare su uptimeservice.it:" -ForegroundColor Cyan
-Write-Host "  /api/v1/update/$Channel.json"
+Write-Host "  /api/v1/update/stable.json"
+if ($Channel -ne "stable") {
+    Write-Host "  /api/v1/update/$Channel.json"
+}
 Write-Host "  /releases/windows/updesk-$Version.exe"
 Write-Host ""
 Write-Host "SHA256 full:      $hashFull"

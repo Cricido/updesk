@@ -1,6 +1,8 @@
-# UpDesk Auto-Update v1
+# UpDesk Auto-Update
 
-This document describes the first minimal and safe auto-update flow for UpDesk.
+This document describes the current UpDesk updater flow for Windows and the
+supporting publish pipeline for the `stable`, `recommended`, and `beta`
+channels.
 
 ## URLs
 
@@ -36,17 +38,76 @@ This document describes the first minimal and safe auto-update flow for UpDesk.
 5. If verification succeeds, `updesk_updater.exe` is launched.
 6. `updesk_updater.exe` waits for the current UpDesk process to exit, launches the downloaded installer, and then tries to restart UpDesk.
 
+## Policy mapping
+
+- `Disattivato`
+  - `enable-check-update = N`
+  - `allow-auto-update = N`
+  - `update-channel = stable`
+- `Canale stabile`
+  - `enable-check-update = Y`
+  - `allow-auto-update = N`
+  - `update-channel = stable`
+- `Aggiornamenti consigliati`
+  - `enable-check-update = Y`
+  - `allow-auto-update = Y`
+  - `update-channel = recommended`
+- `Canale beta`
+  - `enable-check-update = Y`
+  - `allow-auto-update = N`
+  - `update-channel = beta`
+
+## Update states
+
+The updater publishes a simple state machine to the UI:
+
+- `checking`
+- `available`
+- `downloading`
+- `verifying`
+- `ready`
+- `preparing`
+- `launching`
+- `installer-launched`
+- `deferred`
+- `up-to-date`
+- `failed`
+
+`deferred` means the package is already downloaded and verified, but the
+installation has been postponed because there are active remote sessions or
+controlling connections.
+
+## Manifest validation
+
+The client accepts a manifest only if:
+
+- `channel` matches the selected update channel
+- `version` is present and formatted like `X.Y.Z`
+- `url` is `https`
+- `url` host is exactly `updesk.uptimeservice.it`
+- `url` path is under `/releases/windows/`
+- `sha256` is a 64-character hex string
+- `min_supported`, if present, uses the same simple version format
+
+If `min_supported` is greater than the currently installed version, the update
+is automatically treated as mandatory.
+
 ## Logging
 
 Useful log lines:
 
+- `update check requested`
 - `update check started`
 - `update check finished`
 - `update available`
+- `update download attempt`
 - `update download started`
 - `update download completed`
 - `update sha256 ok`
+- `update install deferred`
 - `failed to launch updater`
+- `update installer launched`
+- `updesk_updater.log` entries for installer/restart flow
 
 ## Server layout
 
@@ -83,16 +144,23 @@ python .\deploy_updesk_update_assets.py --channel beta
 
 It will:
 
+- validate the selected channel manifest locally
+- validate that the manifest SHA256 matches the local installer
 - upload the selected channel manifest
 - upload `UptimeDesk-<version>-x86_64-Setup.exe`
 - publish it as `/releases/windows/updesk-<version>.exe`
+- verify the remote installer SHA256
 - validate nginx
 - reload nginx
 - verify:
   - `/api/v1/update/<channel>.json`
   - `/releases/windows/updesk-<version>.exe`
-  - `/ws/id`
-  - `/ws/relay`
+
+Note:
+
+- `/ws/id` and `/ws/relay` are not probed with `HEAD`, because they are
+  websocket endpoints and that check would produce false negatives.
+- Relay compatibility on `443` must remain untouched by updater publishing.
 
 ## Channels
 
@@ -105,6 +173,30 @@ It will:
 - `beta`
   - test channel
   - never recommended for silent rollout
+
+## Release generation
+
+From the project root:
+
+```powershell
+.\release.ps1 -Version "1.0.3" -Notes "Build stabile" -Channel stable
+.\release.ps1 -Version "1.0.4" -Notes "Build consigliata" -Channel recommended
+.\release.ps1 -Version "1.0.5" -Notes "Build beta" -Channel beta
+```
+
+The release script:
+
+- validates the version format
+- updates version files in Rust, Flutter, and Inno Setup
+- builds the Rust library and `updesk_updater.exe`
+- builds Flutter Windows
+- builds the installers
+- computes SHA256
+- writes:
+  - `stable.json`
+  - `<channel>.json`
+  - `version.json`
+  - `version-assistenza.json`
 
 ## Nginx
 
