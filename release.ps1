@@ -135,7 +135,7 @@ if (-not (Test-Path $assistExe)) { throw "Installer assistenza non trovato: $ass
 $hashFull = (Get-FileHash $fullExe -Algorithm SHA256).Hash.ToLower()
 $hashAssist = (Get-FileHash $assistExe -Algorithm SHA256).Hash.ToLower()
 
-$forceBool = [System.Convert]::ToBoolean($Force)
+$forceBool = $Force.IsPresent
 
 Write-JsonFile -Path "$root\version.json" -Data @{
   version = $Version
